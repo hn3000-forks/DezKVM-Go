@@ -59,6 +59,8 @@
         <button id="btnQuickAccess" class="ui mini basic icon button" title="Quick Access Hotkeys"><i class="bolt icon"></i></button>
         <!-- Screenshots -->
         <button id="screenshotBtn" class="ui mini basic icon button" title="Take Screenshot"><i class="camera icon"></i></button>
+        <!-- Screen Recorder -->
+        <button id="screenRecorderBtn" class="ui mini basic icon button" title="Screen Recorder" onclick="toggleScreenRecorder()"><i class="film icon"></i></button>
         <!-- On-screen Keyboard -->
         <button id="btnOnscreenKeyboard" class="ui mini basic icon button" title="Toggle On-Screen Keyboard"><i class="keyboard outline icon"></i></button>
         <!-- Fullscreen -->
@@ -93,6 +95,9 @@
 
     <!-- Copy Box -->
     <div id="copyBox"></div>
+
+    <!-- Screen Recorder -->
+    <div id="screenRecorder"></div>
 
     <!-- Settings Overlay -->
     <div id="settings-overlay"></div>
@@ -191,6 +196,9 @@
         });
         $('#copyBox').load('copy-box.html', function() {
             console.log('Copy Box loaded');
+        });
+        $("#screenRecorder").load('screen-recorder.html', function() {
+            console.log('Screen Recorder loaded');
         });
         $("#settings-overlay").load('settings.html', function() {
             console.log('Settings loaded');
