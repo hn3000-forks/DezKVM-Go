@@ -39,7 +39,7 @@
 .settings-close-btn{
     position: absolute;
     top: 0.5em;
-    right: 0.6em;
+    right: 1.8em;
     z-index: 10;
     background: transparent;
     border: none;
@@ -247,6 +247,15 @@
                         <i class="expand icon"></i> Toggle Fullscreen
                     </button>
                 </div>
+
+                <div class="settings-field">
+                    <label>Image Sharpening</label>
+                    <p class="field-description">Recommend if the remote feed is a terminal. Uses WebGL when available for zero frame-rate impact.</p>
+                    <div class="ui toggle checkbox" id="imageSharpeningCheckbox">
+                        <input type="checkbox" id="chkSettingsImageSharpening" class="auto-save-setting" onchange="toggleImageSharpening()">
+                        <label>Enable image sharpening</label>
+                    </div>
+                </div>
             </div>
 
             <!-- Audio -->
@@ -432,7 +441,8 @@ const SETTINGS_TEMPLATE = {
     askOnPaste: false,
     relativeMouseSensitivity: 1.0,
     baudrate: 115200,
-    saveToLocalStorage: true
+    saveToLocalStorage: true,
+    imageSharpening: false
 };
 
 const SETTINGS_KEY = 'dezkvm_settings';
@@ -464,6 +474,7 @@ function getCurrentSettings() {
     settings.mouseJiggler = document.getElementById('chkSettingsMouseJiggler')?.checked ?? SETTINGS_TEMPLATE.mouseJiggler;
     settings.askOnPaste = document.getElementById('chkSettingsAskOnPaste')?.checked ?? SETTINGS_TEMPLATE.askOnPaste;
     settings.relativeMouseSensitivity = (typeof relativeMouseSensitivity !== 'undefined') ? relativeMouseSensitivity : SETTINGS_TEMPLATE.relativeMouseSensitivity;
+    settings.imageSharpening = document.getElementById('chkSettingsImageSharpening')?.checked ?? SETTINGS_TEMPLATE.imageSharpening;
     
     // Get selected baudrate
     const baudrateRadio = document.querySelector('input[name="baudrate"]:checked');
@@ -622,6 +633,21 @@ function applySettingsToUI(settings) {
         saveChk.checked = settings.saveToLocalStorage;
         $('#saveSettingsCheckbox').checkbox(settings.saveToLocalStorage ? 'check' : 'uncheck');
     }
+
+    // Apply image sharpening
+    const sharpenChk = document.getElementById('chkSettingsImageSharpening');
+    if (sharpenChk && settings.hasOwnProperty('imageSharpening')) {
+        sharpenChk.checked = settings.imageSharpening;
+        $('#imageSharpeningCheckbox').checkbox(settings.imageSharpening ? 'check' : 'uncheck');
+        if (typeof imageSharpeningEnabled !== 'undefined') {
+            imageSharpeningEnabled = settings.imageSharpening;
+            if (settings.imageSharpening) {
+                if (typeof window.startSharpeningPipeline === 'function') window.startSharpeningPipeline();
+            } else {
+                if (typeof window.stopSharpeningPipeline  === 'function') window.stopSharpeningPipeline();
+            }
+        }
+    }
     
     console.log('Settings applied to UI');
 }
@@ -681,6 +707,7 @@ if(typeof $ !== 'undefined' && $.fn.checkbox){
     $('#mouseJigglerCheckbox').checkbox();
     $('#askOnPasteCheckbox').checkbox();
     $('#saveSettingsCheckbox').checkbox();
+    $('#imageSharpeningCheckbox').checkbox();
 }
 
 /* Tab switching */

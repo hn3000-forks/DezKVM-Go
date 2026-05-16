@@ -1490,3 +1490,311 @@ function toggleMouseJiggler() {
             : '<i class="mouse pointer icon"></i> Mouse jiggler disabled'
     });
 }
+
+//  Image Sharpening Pipeline 
+/*
+ * GPU-accelerated Gaussian unsharp-mask sharpening.
+ *
+ * Algorithm:
+ *   1. Each video frame is uploaded to a WebGL texture.
+ *   2. A GLSL fragment shader approximates a Gaussian blur with the 3×3
+ *      kernel  G = [1 2 1 / 2 4 2 / 1 2 1] / 16  (σ ≈ 0.85 px, separable).
+ *   3. The unsharp mask is computed per-pixel entirely on the GPU:
+ *        sharpened = clamp( original + strength × (original − G*original), 0, 1 )
+ *   4. The result is rendered onto a canvas that overlays the <video> element.
+ *      The canvas has pointer-events:none so all mouse/keyboard events pass
+ *      through to the touchscreen overlay underneath.
+ *
+ * When WebGL is unavailable the pipeline falls back to a Canvas-2D separable
+ * Gaussian implementation (slower, but functionally identical).
+ */
+let imageSharpeningEnabled = false;
+let _sharpenRafId = null;
+
+/* Helper: compute canvas position matching the actual video content area */
+function _getSharpenCanvasRect(video) {
+    const rect = video.getBoundingClientRect();
+    const resolution = getResolutionFromCurrentStream();
+    let aspectRatio = 16 / 9;
+    if (resolution && resolution.width && resolution.height) {
+        aspectRatio = resolution.width / resolution.height;
+    }
+    let displayWidth, displayHeight, offsetX, offsetY;
+    if (rect.width / rect.height > aspectRatio) {
+        displayHeight = rect.height;
+        displayWidth  = rect.height * aspectRatio;
+        offsetX = rect.left + (rect.width - displayWidth) / 2;
+        offsetY = rect.top;
+    } else {
+        displayWidth  = rect.width;
+        displayHeight = rect.width / aspectRatio;
+        offsetX = rect.left;
+        offsetY = rect.top + (rect.height - displayHeight) / 2;
+    }
+    return { left: offsetX, top: offsetY, width: displayWidth, height: displayHeight };
+}
+
+(function initSharpeningPipeline() {
+    const video = document.getElementById('video');
+    if (!video) return;
+
+    /* Overlay canvas – sits between <video> and the touchscreen div */
+    const canvas = document.createElement('canvas');
+    canvas.id = 'sharpenCanvas';
+    canvas.style.cssText = 'display:none;position:absolute;pointer-events:none;z-index:1;';
+    video.insertAdjacentElement('afterend', canvas);
+
+    /* Try WebGL first (GPU path), fall back to Canvas 2D (CPU path) */
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (gl) {
+        _initWebGLSharpener(video, canvas, gl);
+    } else {
+        _init2DSharpener(video, canvas);
+    }
+})();
+
+/*  WebGL implementation  */
+function _initWebGLSharpener(video, canvas, gl) {
+    /* Vertex shader – full-screen clip-space quad */
+    const VS = `
+        attribute vec2 a_pos;
+        varying   vec2 v_uv;
+        void main() {
+            /* video textures are flipped in WebGL; un-flip Y */
+            v_uv        = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+            gl_Position = vec4(a_pos, 0.0, 1.0);
+        }`;
+
+    /* Fragment shader – 3×3 Gaussian unsharp mask */
+    const FS = `
+        precision mediump float;
+        uniform sampler2D u_tex;
+        uniform vec2      u_px;   /* (1/width, 1/height) */
+        uniform float     u_str;  /* sharpening strength  */
+        varying vec2 v_uv;
+        void main() {
+            vec3 c  = texture2D(u_tex, v_uv).rgb;
+            vec3 tl = texture2D(u_tex, v_uv + vec2(-u_px.x, -u_px.y)).rgb;
+            vec3 t  = texture2D(u_tex, v_uv + vec2( 0.0,    -u_px.y)).rgb;
+            vec3 tr = texture2D(u_tex, v_uv + vec2( u_px.x, -u_px.y)).rgb;
+            vec3 l  = texture2D(u_tex, v_uv + vec2(-u_px.x,  0.0   )).rgb;
+            vec3 r  = texture2D(u_tex, v_uv + vec2( u_px.x,  0.0   )).rgb;
+            vec3 bl = texture2D(u_tex, v_uv + vec2(-u_px.x,  u_px.y)).rgb;
+            vec3 b  = texture2D(u_tex, v_uv + vec2( 0.0,     u_px.y)).rgb;
+            vec3 br = texture2D(u_tex, v_uv + vec2( u_px.x,  u_px.y)).rgb;
+            /* Gaussian weights: corner=1, edge=2, centre=4  (sum=16) */
+            vec3 blur = (tl + 2.0*t + tr + 2.0*l + 4.0*c + 2.0*r + bl + 2.0*b + br) / 16.0;
+            gl_FragColor = vec4(clamp(c + u_str * (c - blur), 0.0, 1.0), 1.0);
+        }`;
+
+    function makeShader(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+            console.error('[Sharpen] shader compile:', gl.getShaderInfoLog(s));
+            return null;
+        }
+        return s;
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, makeShader(gl.VERTEX_SHADER,   VS));
+    gl.attachShader(prog, makeShader(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error('[Sharpen] shader link:', gl.getProgramInfoLog(prog));
+        return;
+    }
+
+    /* Full-screen triangle strip */
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+    /* Video texture */
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S,     gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T,     gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    const aPos = gl.getAttribLocation(prog,  'a_pos');
+    const uTex = gl.getUniformLocation(prog, 'u_tex');
+    const uPx  = gl.getUniformLocation(prog, 'u_px');
+    const uStr = gl.getUniformLocation(prog, 'u_str');
+
+    function positionCanvas() {
+        const cr = _getSharpenCanvasRect(video);
+        canvas.style.left   = cr.left   + 'px';
+        canvas.style.top    = cr.top    + 'px';
+        canvas.style.width  = cr.width  + 'px';
+        canvas.style.height = cr.height + 'px';
+    }
+
+    function renderFrame() {
+        if (!imageSharpeningEnabled) return;
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) { _sharpenRafId = requestAnimationFrame(renderFrame); return; }
+
+        if (canvas.width !== vw || canvas.height !== vh) {
+            canvas.width  = vw;
+            canvas.height = vh;
+            gl.viewport(0, 0, vw, vh);
+        }
+
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+        gl.useProgram(prog);
+        gl.uniform1i(uTex, 0);
+        gl.uniform2f(uPx, 1.0 / vw, 1.0 / vh);
+        gl.uniform1f(uStr, 1.0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        gl.enableVertexAttribArray(aPos);
+        gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        positionCanvas();
+        _sharpenRafId = requestAnimationFrame(renderFrame);
+    }
+
+    window.startSharpeningPipeline = function () {
+        positionCanvas();
+        canvas.style.display = 'block';
+        if (_sharpenRafId) cancelAnimationFrame(_sharpenRafId);
+        _sharpenRafId = requestAnimationFrame(renderFrame);
+    };
+
+    window.stopSharpeningPipeline = function () {
+        if (_sharpenRafId) { cancelAnimationFrame(_sharpenRafId); _sharpenRafId = null; }
+        canvas.style.display = 'none';
+    };
+
+    window.addEventListener('resize', () => { if (imageSharpeningEnabled) positionCanvas(); });
+}
+
+/*  Canvas-2D fallback (CPU)  */
+function _init2DSharpener(video, canvas) {
+    const srcCanvas = document.createElement('canvas');
+    const srcCtx    = srcCanvas.getContext('2d', { willReadFrequently: true });
+    const outCtx    = canvas.getContext('2d');
+
+    let _tmpBuf  = null;   /* horizontal-pass buffer  */
+    let _blurBuf = null;   /* vertical-pass output    */
+
+    function ensureBuffers(len) {
+        if (!_tmpBuf || _tmpBuf.length !== len) {
+            _tmpBuf  = new Uint8ClampedArray(len);
+            _blurBuf = new Uint8ClampedArray(len);
+        }
+    }
+
+    /*
+     * In-place Gaussian unsharp mask.
+     * Blur kernel (separable): horizontal [1 2 1]/4 then vertical [1 2 1]/4
+     * Combined 2D kernel:  [1 2 1 / 2 4 2 / 1 2 1] / 16  (σ ≈ 0.85 px)
+     * Unsharp mask:  sharpened[i] = clamp(orig[i] + strength*(orig[i] − blur[i]))
+     */
+    function applyUnsharpMask(data, w, h, strength) {
+        const len = w * h * 4;
+        ensureBuffers(len);
+        const tmp  = _tmpBuf;
+        const blur = _blurBuf;
+
+        /* Horizontal pass */
+        for (let y = 0; y < h; y++) {
+            const rowBase = y * w;
+            for (let x = 0; x < w; x++) {
+                const i  = (rowBase + x) * 4;
+                const il = x > 0     ? i - 4 : i;
+                const ir = x < w - 1 ? i + 4 : i;
+                tmp[i    ] = (data[il    ] + (data[i    ] << 1) + data[ir    ]) >> 2;
+                tmp[i + 1] = (data[il + 1] + (data[i + 1] << 1) + data[ir + 1]) >> 2;
+                tmp[i + 2] = (data[il + 2] + (data[i + 2] << 1) + data[ir + 2]) >> 2;
+                tmp[i + 3] = 255;
+            }
+        }
+
+        /* Vertical pass */
+        for (let y = 0; y < h; y++) {
+            const row  =  y          * w;
+            const rowT = (y > 0     ? y - 1 : 0    ) * w;
+            const rowB = (y < h - 1 ? y + 1 : h - 1) * w;
+            for (let x = 0; x < w; x++) {
+                const i  = (row  + x) * 4;
+                const it = (rowT + x) * 4;
+                const ib = (rowB + x) * 4;
+                blur[i    ] = (tmp[it    ] + (tmp[i    ] << 1) + tmp[ib    ]) >> 2;
+                blur[i + 1] = (tmp[it + 1] + (tmp[i + 1] << 1) + tmp[ib + 1]) >> 2;
+                blur[i + 2] = (tmp[it + 2] + (tmp[i + 2] << 1) + tmp[ib + 2]) >> 2;
+                blur[i + 3] = 255;
+            }
+        }
+
+        /* Unsharp mask */
+        for (let i = 0; i < len; i += 4) {
+            data[i    ] = Math.max(0, Math.min(255, data[i    ] + strength * (data[i    ] - blur[i    ])));
+            data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + strength * (data[i + 1] - blur[i + 1])));
+            data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + strength * (data[i + 2] - blur[i + 2])));
+        }
+    }
+
+    function positionCanvas() {
+        const cr = _getSharpenCanvasRect(video);
+        canvas.style.left   = cr.left   + 'px';
+        canvas.style.top    = cr.top    + 'px';
+        canvas.style.width  = cr.width  + 'px';
+        canvas.style.height = cr.height + 'px';
+    }
+
+    function renderFrame() {
+        if (!imageSharpeningEnabled) return;
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) { _sharpenRafId = requestAnimationFrame(renderFrame); return; }
+
+        if (srcCanvas.width !== vw || srcCanvas.height !== vh) {
+            srcCanvas.width = vw; srcCanvas.height = vh;
+            canvas.width    = vw; canvas.height    = vh;
+        }
+
+        srcCtx.drawImage(video, 0, 0, vw, vh);
+        const frame = srcCtx.getImageData(0, 0, vw, vh);
+        applyUnsharpMask(frame.data, vw, vh, 1.0);
+        outCtx.putImageData(frame, 0, 0);
+
+        positionCanvas();
+        _sharpenRafId = requestAnimationFrame(renderFrame);
+    }
+
+    window.startSharpeningPipeline = function () {
+        positionCanvas();
+        canvas.style.display = 'block';
+        if (_sharpenRafId) cancelAnimationFrame(_sharpenRafId);
+        _sharpenRafId = requestAnimationFrame(renderFrame);
+    };
+
+    window.stopSharpeningPipeline = function () {
+        if (_sharpenRafId) { cancelAnimationFrame(_sharpenRafId); _sharpenRafId = null; }
+        canvas.style.display = 'none';
+    };
+
+    window.addEventListener('resize', () => { if (imageSharpeningEnabled) positionCanvas(); });
+}
+
+/* Called from settings.html */
+function toggleImageSharpening() {
+    const chk = document.getElementById('chkSettingsImageSharpening');
+    imageSharpeningEnabled = chk ? chk.checked : false;
+    if (imageSharpeningEnabled) {
+        if (typeof window.startSharpeningPipeline === 'function') window.startSharpeningPipeline();
+        $('body').toast({ message: '<i class="magic icon"></i> Image sharpening enabled' });
+    } else {
+        if (typeof window.stopSharpeningPipeline === 'function') window.stopSharpeningPipeline();
+        $('body').toast({ message: '<i class="magic icon"></i> Image sharpening disabled' });
+    }
+}
