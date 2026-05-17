@@ -73,6 +73,8 @@ go build
 
 ![image-20260218134153419](img/README/image-20260218134153419.png)
 
+[See more screenshots](https://github.com/tobychui/DezKVM-Go/wiki/Screenshots)
+
 ## DezKVM-Go Device
 
 Here are a few photos on the device itself if you are interested.
