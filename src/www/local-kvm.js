@@ -915,12 +915,13 @@ async function requestMediaDevicePermission() {
 
 function findDevice(devices, type, vid, pid) {
     // Spec doesn't define how to find a device with specified VID/PID
-    // Chrome appends (vid:pid) to the device label
-    // TODO: make sure it works on Firefox/Safari
+    // Chrome appends (vid:pid) to the device label; Linux labels may have
+    // trailing whitespace or uppercase hex, so use a case-insensitive regex
+    const pattern = new RegExp(`\\(${vid}:${pid}\\)\\s*$`, 'i');
     return devices.find(
         x =>
             x.kind === type &&
-            x.label.endsWith(`(${vid.toLowerCase()}:${pid.toLowerCase()})`)
+            pattern.test(x.label)
     );
 }
 
