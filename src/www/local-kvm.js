@@ -913,15 +913,25 @@ async function requestMediaDevicePermission() {
     }
 }
 
+function isLinuxChromium() {
+    const ua = navigator.userAgent;
+    return /Linux/.test(ua) && /Chrome\//.test(ua) && !/Android/.test(ua);
+}
+
 function findDevice(devices, type, vid, pid) {
     // Spec doesn't define how to find a device with specified VID/PID
     // Chrome appends (vid:pid) to the device label
-    // TODO: make sure it works on Firefox/Safari
-    return devices.find(
-        x =>
-            x.kind === type &&
-            x.label.endsWith(`(${vid.toLowerCase()}:${pid.toLowerCase()})`)
-    );
+    const pattern = new RegExp(`\\(${vid}:${pid}\\)\\s*$`, 'i');
+    const found = devices.find(x => x.kind === type && pattern.test(x.label));
+    if (found) {
+        return found;
+    }
+
+    // Temporary workaround for #1 - not sure why this check can't pass Ubuntu 26.04 Chrome
+    if (isLinuxChromium()) {
+        return devices.find(x => x.kind === type) || null;
+    }
+    return null;
 }
 
 async function startStream() {
