@@ -41,3 +41,15 @@ Here are the parameters and properties I pick for making the PCB above. You can 
 ![5](img/README/5.png)
 
 For details, see the BOM list and Gerber files.
+
+## PCB v2
+
+The v2 PCB is a refershed design of the original DezKVM-Go PCB but with the following updates
+
+- Added hardware mode bit override pads
+- Updated crystal package (so now it is JLC compatible)
+- Added another internal downstream USB 2.0 port
+
+![pcb_update](img/README/pcb_update.jpg)
+
+This board have the exact form factor of the v1, so you can use it in gen1 - 3 3D printed case or assembly methods. 
