@@ -943,7 +943,8 @@ async function startStream() {
         const supportedVidPidPairs = [
             { vid: '534d', pid: '2109' , product: "DezKVM-Go Original"}, // MS2109, original DezKVM-Go
             { vid: '345f', pid: '2109' , product: "DezKVM-Go Gen2"}, // DezKVM-Go gen2
-        ]
+        ];
+        const deviceLabels = devices.map(x => x.label);
         let videoDevice = null;
         let audioDevice = null;
         for (const { vid, pid, product } of supportedVidPidPairs) {
@@ -957,9 +958,10 @@ async function startStream() {
         }
 
         if (!videoDevice) {
-            console.error('MS2109 video device not found');
+            console.error('MS2109 video device not found', deviceLabels.join(', '));
+            var message = `MS2109 video capture device not found. Please connect the device and try again. Did not recognize any of {deviceLabels.join(',')}.`;
             $('body').toast({
-                message: '<i class="red exclamation triangle icon"></i> MS2109 video capture device not found. Please connect the device and try again.'
+                message: '<i class="red exclamation triangle icon"></i> '+message
             });
 
             // Print all connected video devices for debugging
